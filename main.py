@@ -1,12 +1,13 @@
 from fastmcp import FastMCP
 import os
-import sqlite3
+import aiosqlite
 import tempfile
+import asyncio
 import json
 
 
 # ============================================================
-# Paths
+# DATABASE PATH
 # ============================================================
 
 TEMP_DIR = tempfile.gettempdir()
@@ -19,61 +20,71 @@ print(f"Database path: {DB_PATH}")
 
 
 # ============================================================
-# FastMCP Server
+# MCP SERVER
 # ============================================================
 
 mcp = FastMCP("ExpenseTracker")
 
 
 # ============================================================
-# Database Initialization
+# DATABASE INITIALIZATION
 # ============================================================
 
 
-def init_db():
+async def init_db():
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        async with aiosqlite.connect(DB_PATH) as conn:
+            # Enable WAL mode
+            await conn.execute("PRAGMA journal_mode=WAL")
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS expenses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                subcategory TEXT DEFAULT '',
-                note TEXT DEFAULT ''
+            # Create table
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS expenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    category TEXT NOT NULL,
+                    subcategory TEXT DEFAULT '',
+                    note TEXT DEFAULT ''
+                )
+                """
             )
-            """
-        )
 
-        conn.commit()
+            await conn.commit()
 
-    print("Database initialized successfully.")
+            print("Database initialized successfully with write access")
 
+    except Exception as e:
+        print(f"Database initialization error: {e}")
 
-# Initialize database when server starts
-init_db()
+        raise
 
 
 # ============================================================
-# TOOL 1: Add Expense
+# ADD EXPENSE
 # ============================================================
 
 
 @mcp.tool()
-def add_expense(date, amount, category, subcategory="", note=""):
+async def add_expense(date, amount, category, subcategory="", note=""):
     """
     Add a new expense entry to the database.
     """
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.execute(
+        async with aiosqlite.connect(DB_PATH) as conn:
+            cursor = await conn.execute(
                 """
                 INSERT INTO expenses
-                (date, amount, category, subcategory, note)
+                (
+                    date,
+                    amount,
+                    category,
+                    subcategory,
+                    note
+                )
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (date, amount, category, subcategory, note),
@@ -81,35 +92,32 @@ def add_expense(date, amount, category, subcategory="", note=""):
 
             expense_id = cursor.lastrowid
 
-            conn.commit()
+            await conn.commit()
 
-        return {
-            "status": "success",
-            "id": expense_id,
-            "message": "Expense added successfully",
-        }
-
-    except sqlite3.OperationalError as e:
-        return {"status": "error", "message": f"Database error: {str(e)}"}
+            return {
+                "status": "success",
+                "id": expense_id,
+                "message": "Expense added successfully",
+            }
 
     except Exception as e:
-        return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+        return {"status": "error", "message": f"Database error: {str(e)}"}
 
 
 # ============================================================
-# TOOL 2: List Expenses
+# LIST EXPENSES
 # ============================================================
 
 
 @mcp.tool()
-def list_expenses(start_date, end_date):
+async def list_expenses(start_date, end_date):
     """
     List expense entries within an inclusive date range.
     """
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            cursor = conn.execute(
+        async with aiosqlite.connect(DB_PATH) as conn:
+            cursor = await conn.execute(
                 """
                 SELECT
                     id,
@@ -125,9 +133,9 @@ def list_expenses(start_date, end_date):
                 (start_date, end_date),
             )
 
-            columns = [column[0] for column in cursor.description]
+            rows = await cursor.fetchall()
 
-            rows = cursor.fetchall()
+            columns = [column[0] for column in cursor.description]
 
             return [dict(zip(columns, row)) for row in rows]
 
@@ -136,19 +144,19 @@ def list_expenses(start_date, end_date):
 
 
 # ============================================================
-# TOOL 3: Summarize Expenses
+# SUMMARIZE EXPENSES
 # ============================================================
 
 
 @mcp.tool()
-def summarize(start_date, end_date, category=None):
+async def summarize(start_date, end_date, category=None):
     """
     Summarize expenses by category
     within an inclusive date range.
     """
 
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        async with aiosqlite.connect(DB_PATH) as conn:
             query = """
                 SELECT
                     category,
@@ -173,11 +181,11 @@ def summarize(start_date, end_date, category=None):
                 ORDER BY total_amount DESC
             """
 
-            cursor = conn.execute(query, params)
+            cursor = await conn.execute(query, params)
+
+            rows = await cursor.fetchall()
 
             columns = [column[0] for column in cursor.description]
-
-            rows = cursor.fetchall()
 
             return [dict(zip(columns, row)) for row in rows]
 
@@ -186,15 +194,12 @@ def summarize(start_date, end_date, category=None):
 
 
 # ============================================================
-# RESOURCE: Categories
+# CATEGORIES RESOURCE
 # ============================================================
 
 
 @mcp.resource("expense://categories", mime_type="application/json")
-def categories():
-    """
-    Return expense categories from categories.json.
-    """
+async def categories():
 
     default_categories = {
         "categories": [
@@ -219,12 +224,14 @@ def categories():
         return json.dumps(default_categories, indent=2)
 
     except Exception as e:
-        return json.dumps({"error": f"Could not load categories: {str(e)}"})
+        return json.dumps({"error": (f"Could not load categories: {str(e)}")})
 
 
 # ============================================================
-# Start MCP Server
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
-    mcp.run()
+    asyncio.run(init_db())
+
+    mcp.run(transport="http", host="0.0.0.0", port=8000)
