@@ -2,43 +2,34 @@ from fastmcp import FastMCP
 import os
 import aiosqlite
 import tempfile
-import asyncio
 import json
 
 
-# ============================================================
-# DATABASE PATH
-# ============================================================
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
 
 TEMP_DIR = tempfile.gettempdir()
-
 DB_PATH = os.path.join(TEMP_DIR, "expenses.db")
-
 CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "categories.json")
 
 print(f"Database path: {DB_PATH}")
 
-
-# ============================================================
-# MCP SERVER
-# ============================================================
-
 mcp = FastMCP("ExpenseTracker")
 
 
-# ============================================================
-# DATABASE INITIALIZATION
-# ============================================================
+# --------------------------------------------------
+# Database Initialization
+# --------------------------------------------------
 
 
 async def init_db():
-
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
             # Enable WAL mode
             await conn.execute("PRAGMA journal_mode=WAL")
 
-            # Create table
+            # Create expenses table
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS expenses (
@@ -52,26 +43,50 @@ async def init_db():
                 """
             )
 
+            # Test write access
+            await conn.execute(
+                """
+                INSERT OR IGNORE INTO expenses
+                (date, amount, category)
+                VALUES ('2000-01-01', 0, 'test')
+                """
+            )
+
+            await conn.execute(
+                """
+                DELETE FROM expenses
+                WHERE category = 'test'
+                """
+            )
+
             await conn.commit()
 
             print("Database initialized successfully with write access")
 
     except Exception as e:
         print(f"Database initialization error: {e}")
-
         raise
 
 
-# ============================================================
-# ADD EXPENSE
-# ============================================================
+# --------------------------------------------------
+# MCP Lifespan
+# --------------------------------------------------
+
+
+@mcp.lifespan
+async def lifespan():
+    await init_db()
+    yield
+
+
+# --------------------------------------------------
+# Add Expense Tool
+# --------------------------------------------------
 
 
 @mcp.tool()
 async def add_expense(date, amount, category, subcategory="", note=""):
-    """
-    Add a new expense entry to the database.
-    """
+    """Add a new expense entry to the database."""
 
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
@@ -101,19 +116,23 @@ async def add_expense(date, amount, category, subcategory="", note=""):
             }
 
     except Exception as e:
+        if "readonly" in str(e).lower():
+            return {
+                "status": "error",
+                "message": "Database is in read-only mode. Check file permissions.",
+            }
+
         return {"status": "error", "message": f"Database error: {str(e)}"}
 
 
-# ============================================================
-# LIST EXPENSES
-# ============================================================
+# --------------------------------------------------
+# List Expenses Tool
+# --------------------------------------------------
 
 
 @mcp.tool()
 async def list_expenses(start_date, end_date):
-    """
-    List expense entries within an inclusive date range.
-    """
+    """List expense entries within an inclusive date range."""
 
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
@@ -133,9 +152,9 @@ async def list_expenses(start_date, end_date):
                 (start_date, end_date),
             )
 
-            rows = await cursor.fetchall()
-
             columns = [column[0] for column in cursor.description]
+
+            rows = await cursor.fetchall()
 
             return [dict(zip(columns, row)) for row in rows]
 
@@ -143,17 +162,14 @@ async def list_expenses(start_date, end_date):
         return {"status": "error", "message": f"Error listing expenses: {str(e)}"}
 
 
-# ============================================================
-# SUMMARIZE EXPENSES
-# ============================================================
+# --------------------------------------------------
+# Summarize Expenses Tool
+# --------------------------------------------------
 
 
 @mcp.tool()
 async def summarize(start_date, end_date, category=None):
-    """
-    Summarize expenses by category
-    within an inclusive date range.
-    """
+    """Summarize expenses by category within an inclusive date range."""
 
     try:
         async with aiosqlite.connect(DB_PATH) as conn:
@@ -183,9 +199,9 @@ async def summarize(start_date, end_date, category=None):
 
             cursor = await conn.execute(query, params)
 
-            rows = await cursor.fetchall()
-
             columns = [column[0] for column in cursor.description]
+
+            rows = await cursor.fetchall()
 
             return [dict(zip(columns, row)) for row in rows]
 
@@ -193,13 +209,14 @@ async def summarize(start_date, end_date, category=None):
         return {"status": "error", "message": f"Error summarizing expenses: {str(e)}"}
 
 
-# ============================================================
-# CATEGORIES RESOURCE
-# ============================================================
+# --------------------------------------------------
+# Categories Resource
+# --------------------------------------------------
 
 
 @mcp.resource("expense://categories", mime_type="application/json")
 async def categories():
+    """Return available expense categories."""
 
     default_categories = {
         "categories": [
@@ -227,11 +244,9 @@ async def categories():
         return json.dumps({"error": (f"Could not load categories: {str(e)}")})
 
 
-# ============================================================
-# START SERVER
-# ============================================================
+# --------------------------------------------------
+# Start MCP Server
+# --------------------------------------------------
 
 if __name__ == "__main__":
-    asyncio.run(init_db())
-
     mcp.run(transport="http", host="0.0.0.0", port=8000)
